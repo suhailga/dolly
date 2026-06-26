@@ -158,6 +158,55 @@ dolly report clear                 # clear crash log (prompts for confirmation)
 
 Logs are stored with user-only permissions (`0600`). A `submitted.json` sidecar prevents duplicate issue reports.
 
+### MCP server — let an LLM read your panes
+
+`dolly mcp` starts a [Model Context Protocol](https://modelcontextprotocol.io) server on stdio giving an LLM **read-only** access to your tmux sessions — no keystrokes, no mutations.
+
+| Tool | What it does |
+|------|--------------|
+| `list_sessions` | All tmux sessions — dolly-managed **and** hand-created (`managed: false`), with live window counts and alive status |
+| `list_panes` | Every window/pane in a session: pane id, name (title), cwd, running command, `start_command`. `compact:true` trims to id/title/command/cwd; `filter:"web/ai"` returns only matching panes |
+| `read_pane` | Read a pane's output/logs (full, untruncated lines) by pane id (`%3`) or `session:window.pane`; `history_lines` pulls scrollback, or `start`/`end` read a specific scrollback range |
+| `tail_pane` | Live-tail a pane: first call returns the current screen, each later call returns only new output (lossless, via `tmux pipe-pane`). Poll in a loop; `{"stop":true}` ends it |
+| `search_panes` | Regex-grep every pane; returns **full** matching lines with pane id/window/line. `context:N` adds surrounding lines (grep -C), `tail:N` scopes to recent output, `max_matches` caps results |
+| `wait_for_pattern` | Block until a pane's output matches a regex (or `timeout_seconds`), then return the matching line + context. Replaces sleep/poll loops when waiting for a signal like `status=ok` |
+
+Everything is **queried live from tmux on every call** — there is no config/snapshot cache — so panes, windows, and whole sessions added by hand (including in throwaway sessions) are always reflected. To spot a manually-added pane: pane ids are creation-ordered (higher `%N` = newer), and dolly config panes carry a meaningful title with `start_command` like `zsh -l`, while hand-split panes show the hostname as title and a `start_command` like `exec /bin/zsh`.
+
+Point your MCP client at `dolly mcp` as a stdio server:
+
+```json
+{ "mcpServers": { "dolly": { "command": "dolly", "args": ["mcp"] } } }
+```
+
+Typical flow: `list_sessions` → `list_panes` → `read_pane` (read logs) or `search_panes` (hunt errors across the session).
+
+**Live tailing.** MCP is request/response (no server push), so "tailing" means the LLM *polls* `tail_pane` in a loop. Unlike repeated `read_pane` calls, `tail_pane` returns only the new output since the previous call — it's backed by `tmux pipe-pane`, so nothing is missed between polls. Pipes and their buffers are cleaned up automatically when the client disconnects, or when you pass `{"stop":true}`.
+
+#### Playground (`dolly mcp-shell`)
+
+A psql-style REPL for poking at the server live — it launches `dolly mcp` as a subprocess and talks MCP to it, so you see real responses. Line editing and history come from `golang.org/x/term`.
+
+```bash
+dolly mcp-shell
+```
+
+```
+dolly-mcp> \tools                       # list tools
+dolly-mcp> \describe read_pane          # show a tool's full schema
+dolly-mcp> list_sessions                # call a tool
+dolly-mcp> list_panes distill           # positional args
+dolly-mcp> read_pane %58 200            # pane + history_lines
+dolly-mcp> tail_pane %58                 # start tailing; call again for new output
+dolly-mcp> search_panes distill "error|warn" 500
+dolly-mcp> wait_for_pattern %58 "status=ok"   # block until it appears
+dolly-mcp> read_pane {"pane":"%58","history_lines":50}   # JSON args also work
+dolly-mcp> \raw tools/list              # raw JSON-RPC
+dolly-mcp> \quit
+```
+
+Args are JSON (`{...}`) or positional, mapped to the tool's fields in order (quote values with spaces). It also scripts: `echo 'list_sessions' | dolly mcp-shell`. Use `-cmd "<server>"` to drive any other stdio MCP server.
+
 ---
 
 ## YAML Configuration Reference

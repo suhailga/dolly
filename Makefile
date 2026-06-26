@@ -41,8 +41,14 @@ build-test: ## Build the test runner
 
 install: build ## Install dolly to system PATH
 	@echo "$(YELLOW)Installing $(BINARY_NAME) to $(INSTALL_PATH)...$(NC)"
-	sudo cp $(BINARY_NAME) $(INSTALL_PATH)/
-	sudo chmod +x $(INSTALL_PATH)/$(BINARY_NAME)
+	@# Remove first so the new binary lands on a FRESH inode. Overwriting in
+	@# place (cp over an existing file) can leave macOS enforcing a stale
+	@# code-signature verdict on the old inode, which SIGKILLs the binary at
+	@# launch even though `codesign -v` passes. A fresh inode avoids that.
+	sudo rm -f $(INSTALL_PATH)/$(BINARY_NAME)
+	sudo install -m 755 $(BINARY_NAME) $(INSTALL_PATH)/$(BINARY_NAME)
+	@# Strip quarantine/provenance xattrs (no-op on Linux; ignore failures).
+	-@sudo xattr -c $(INSTALL_PATH)/$(BINARY_NAME) 2>/dev/null || true
 	@echo "$(GREEN)✅ Installed $(BINARY_NAME) to $(INSTALL_PATH)$(NC)"
 	@echo "$(BLUE)You can now run 'dolly' from anywhere!$(NC)"
 
