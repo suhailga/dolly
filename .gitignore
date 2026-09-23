@@ -1,6 +1,6 @@
 # Binaries
-dolly
-test_runner
+/dolly
+/test_runner
 
 # Go build artifacts
 *.exe
