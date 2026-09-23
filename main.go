@@ -14,11 +14,15 @@ import (
 
 	"tmux-manager/config"
 	"tmux-manager/internal/crashlog"
+	"tmux-manager/internal/mcpserver"
+	"tmux-manager/internal/mcpshell"
 	"tmux-manager/prompt"
 	"tmux-manager/registry"
 	"tmux-manager/shortcuts"
 	"tmux-manager/throwaway"
 	"tmux-manager/tmux"
+
+	"golang.org/x/term"
 )
 
 // version is injected at build time via -ldflags "-X main.version=<tag>"
@@ -31,7 +35,7 @@ func main() {
 	subcmd := "main"
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
-		case "throwaway", "sessions", "attach", "sync", "shortcuts", "report":
+		case "throwaway", "sessions", "attach", "sync", "shortcuts", "report", "mcp", "mcp-shell":
 			subcmd = os.Args[1]
 		default:
 			// Detect -exec/-e flag so panics in exec mode are labelled correctly
@@ -66,6 +70,12 @@ func main() {
 		case "report":
 			handleReport(os.Args[2:])
 			return
+		case "mcp":
+			handleMCP(os.Args[2:])
+			return
+		case "mcp-shell":
+			handleMCPShell(os.Args[2:])
+			return
 		}
 	}
 
@@ -96,6 +106,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  report    [sub-action] [-last N] [-format table|json]\n")
 		fmt.Fprintf(os.Stderr, "            Sub-actions: submit, preview, url, mark-submitted, clear\n")
 		fmt.Fprintf(os.Stderr, "            View crash logs or open a pre-filled GitHub issue\n")
+		fmt.Fprintf(os.Stderr, "  mcp                      Start an MCP server (stdio) exposing panes to an LLM\n")
+		fmt.Fprintf(os.Stderr, "  mcp-shell                Interactive playground/REPL for the MCP server\n")
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
 		fmt.Fprintf(os.Stderr, "  %s my-project.yml                           # Create session from YAML\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -t my-project.yml                        # Terminate session\n", os.Args[0])
@@ -687,7 +699,7 @@ func printSessionsJSON(sessions []registry.SessionStatus) {
 
 func handleSync(args []string) {
 	fs := flag.NewFlagSet("sync", flag.ExitOnError)
-	adopt  := fs.Bool("adopt",   false, "Also adopt running sessions not in registry")
+	adopt := fs.Bool("adopt", false, "Also adopt running sessions not in registry")
 	dryRun := fs.Bool("dry-run", false, "Preview changes without writing")
 	format := fs.String("format", "table", "Output format: table | json")
 
@@ -1146,6 +1158,80 @@ func handleReport(args []string) {
 		fs.Usage()
 		os.Exit(1)
 	}
+}
+
+// ── mcp subcommand ────────────────────────────────────────────────────────────
+
+// handleMCP starts the Model Context Protocol server on stdio. It exposes
+// dolly's tmux sessions, windows, and panes to an LLM as read-only tools so the
+// model can discover sessions, see what is running in each pane, read a pane's
+// output/logs, and search across panes.
+func handleMCP(args []string) {
+	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: dolly mcp\n\n")
+		fmt.Fprintf(os.Stderr, "Starts a Model Context Protocol (MCP) server on stdio that gives an\n")
+		fmt.Fprintf(os.Stderr, "LLM read-only access to your dolly tmux sessions, windows, and panes.\n\n")
+		fmt.Fprintf(os.Stderr, "Tools exposed: list_sessions, list_panes, read_pane, search_panes.\n\n")
+		fmt.Fprintf(os.Stderr, "Configure your MCP client to run \"dolly mcp\" as a stdio server.\n")
+	}
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	srv := mcpserver.New(os.Stdin, os.Stdout, version)
+	if err := srv.Serve(); err != nil {
+		crashlog.Fatal("mcp", version, err)
+	}
+}
+
+// handleMCPShell starts an interactive, psql-style playground for the MCP
+// server. By default it launches this dolly binary's own "mcp" server as a
+// subprocess and talks JSON-RPC to it, so responses are tested end-to-end.
+func handleMCPShell(args []string) {
+	fs := flag.NewFlagSet("mcp-shell", flag.ExitOnError)
+	cmdStr := fs.String("cmd", "", "MCP stdio server to launch (default: this dolly binary's 'mcp' server)")
+	noColor := fs.Bool("no-color", false, "Disable colored output")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: dolly mcp-shell [flags]\n\n")
+		fmt.Fprintf(os.Stderr, "An interactive playground (REPL) for the dolly MCP server.\n")
+		fmt.Fprintf(os.Stderr, "List tools, inspect schemas, and call tools to see live responses.\n\n")
+		fmt.Fprintf(os.Stderr, "Flags:\n")
+		fs.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nExamples:\n")
+		fmt.Fprintf(os.Stderr, "  dolly mcp-shell                       # play with dolly's MCP server\n")
+		fmt.Fprintf(os.Stderr, "  dolly mcp-shell -cmd \"some-mcp-srv\"   # drive any other stdio MCP server\n")
+		fmt.Fprintf(os.Stderr, "  echo 'list_sessions' | dolly mcp-shell  # script a one-off call\n")
+	}
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	var serverArgs []string
+	if *cmdStr != "" {
+		serverArgs = strings.Fields(*cmdStr)
+	} else {
+		self, err := os.Executable()
+		if err != nil || self == "" {
+			self = "dolly"
+		}
+		serverArgs = []string{self, "mcp"}
+	}
+
+	opt := mcpshell.Options{
+		In:          os.Stdin,
+		Out:         os.Stdout,
+		Color:       !*noColor && isTerminal(os.Stdout),
+		Interactive: isTerminal(os.Stdin),
+	}
+	if err := mcpshell.Run(serverArgs, version, opt); err != nil {
+		crashlog.Fatal("mcp-shell", version, err)
+	}
+}
+
+// isTerminal reports whether f is attached to a terminal (vs a pipe/file).
+func isTerminal(f *os.File) bool {
+	return term.IsTerminal(int(f.Fd()))
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

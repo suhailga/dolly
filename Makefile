@@ -9,8 +9,17 @@ all: clean deps build test
 # Variables
 BINARY_NAME=dolly
 TEST_BINARY=test_runner
-INSTALL_PATH=/usr/local/bin
 VERSION=v1.0.0
+
+# Install path: default to $PREFIX/bin (e.g. Termux) if PREFIX is set, otherwise /usr/local/bin
+ifdef PREFIX
+INSTALL_PATH ?= $(PREFIX)/bin
+else
+INSTALL_PATH ?= /usr/local/bin
+endif
+
+# Only use sudo if install directory is not writable and sudo is available
+SUDO := $(shell [ -w "$(INSTALL_PATH)" ] 2>/dev/null || [ -w "$$(dirname "$(INSTALL_PATH)" 2>/dev/null)" ] 2>/dev/null || which sudo 2>/dev/null)
 
 # Colors for output
 RED=\033[0;31m
@@ -41,14 +50,21 @@ build-test: ## Build the test runner
 
 install: build ## Install dolly to system PATH
 	@echo "$(YELLOW)Installing $(BINARY_NAME) to $(INSTALL_PATH)...$(NC)"
-	sudo cp $(BINARY_NAME) $(INSTALL_PATH)/
-	sudo chmod +x $(INSTALL_PATH)/$(BINARY_NAME)
+	@# Remove first so the new binary lands on a FRESH inode. Overwriting in
+	@# place (cp over an existing file) can leave macOS enforcing a stale
+	@# code-signature verdict on the old inode, which SIGKILLs the binary at
+	@# launch even though `codesign -v` passes. A fresh inode avoids that.
+	$(SUDO) mkdir -p $(INSTALL_PATH)
+	$(SUDO) rm -f $(INSTALL_PATH)/$(BINARY_NAME)
+	$(SUDO) install -m 755 $(BINARY_NAME) $(INSTALL_PATH)/$(BINARY_NAME)
+	@# Strip quarantine/provenance xattrs (no-op on Linux; ignore failures).
+	-@$(SUDO) xattr -c $(INSTALL_PATH)/$(BINARY_NAME) 2>/dev/null || true
 	@echo "$(GREEN)✅ Installed $(BINARY_NAME) to $(INSTALL_PATH)$(NC)"
 	@echo "$(BLUE)You can now run 'dolly' from anywhere!$(NC)"
 
 uninstall: ## Uninstall dolly from system PATH
 	@echo "$(YELLOW)Uninstalling $(BINARY_NAME) from $(INSTALL_PATH)...$(NC)"
-	sudo rm -f $(INSTALL_PATH)/$(BINARY_NAME)
+	$(SUDO) rm -f $(INSTALL_PATH)/$(BINARY_NAME)
 	@echo "$(GREEN)✅ Uninstalled $(BINARY_NAME)$(NC)"
 
 clean: ## Clean build artifacts
