@@ -184,6 +184,9 @@ func CreateTmuxSession(cfg *config.TmuxConfig) error {
 	// Kill existing session if it exists
 	exec.Command("tmux", "kill-session", "-t", cfg.SessionName).Run()
 
+	// Ensure tmux server is running so options can be set globally
+	exec.Command("tmux", "start-server").Run()
+
 	// Set base-index to 1 so window numbering starts from 1
 	exec.Command("tmux", "set-option", "-g", "base-index", "1").Run()
 
@@ -291,9 +294,9 @@ func CreateTmuxSession(cfg *config.TmuxConfig) error {
 	}
 
 	// Select first window
-	cmd = exec.Command("tmux", "select-window", "-t", fmt.Sprintf("%s:1", cfg.SessionName))
+	cmd = exec.Command("tmux", "select-window", "-t", fmt.Sprintf("%s:%s", cfg.SessionName, firstWindow.Name))
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to select first window: %w", err)
+		return fmt.Errorf("failed to select first window '%s': %w", firstWindow.Name, err)
 	}
 
 	// Add shell alias if RC file is configured
